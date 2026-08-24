@@ -31,104 +31,203 @@ const BookSchema = z.object({
 
 
 // ================================
+// STAGE 5: RUN STATISTICS
+// ================================
+const stats = {
+  pages_fetched: 0,
+  cache_hits: 0,
+  valid_records: 0,
+  invalid_records: 0,
+  failed_pages: 0
+};
+
+
+// ================================
+// FETCH WITH RETRY LOGIC
+// ================================
+async function fetchPage(url, label) {
+
+  const maxAttempts = 2;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+
+    try {
+
+      const response = await axios.get(url, {
+        timeout: 5000,
+        headers: {
+          "User-Agent":
+            "FlyRankIntern-AI/1.0 (polite-scrapper)"
+        }
+      });
+
+      if (response.status === 200) {
+        stats.pages_fetched++;
+
+        console.log(
+          `FETCH: ${label}`
+        );
+
+        return response.data;
+      }
+
+    } catch (error) {
+
+      const status =
+        error.response?.status;
+
+      // Do not retry 404 or 403
+      if (status === 404 || status === 403) {
+
+        console.error(
+          `FAILED: ${label} - HTTP ${status}`
+        );
+
+        stats.failed_pages++;
+
+        return null;
+      }
+
+      // Retry timeout or server error once
+      const isRetryable =
+        !status || status >= 500;
+
+      if (
+        isRetryable &&
+        attempt < maxAttempts
+      ) {
+
+        console.log(
+          `RETRY: ${label} - attempt ${attempt + 1}`
+        );
+
+        await sleep(1000);
+
+        continue;
+      }
+
+      console.error(
+        `FAILED: ${label} - ${error.message}`
+      );
+
+      stats.failed_pages++;
+
+      return null;
+    }
+  }
+
+  stats.failed_pages++;
+
+  return null;
+}
+
+
+// ================================
 // FETCH CATALOGUE PAGE
 // ================================
-async function getCataloguePage(url, pageNumber) {
+async function getCataloguePage(
+  url,
+  pageNumber
+) {
+
   const cacheFile = path.join(
     cacheDir,
     `catalogue-page-${pageNumber}.html`
   );
 
   if (fs.existsSync(cacheFile)) {
-    console.log(`CACHE HIT: Catalogue Page ${pageNumber}`);
-    return fs.readFileSync(cacheFile, "utf8");
+
+    console.log(
+      `CACHE HIT: Catalogue Page ${pageNumber}`
+    );
+
+    stats.cache_hits++;
+
+    return fs.readFileSync(
+      cacheFile,
+      "utf8"
+    );
   }
 
   if (pageNumber > 1) {
     await sleep(500);
   }
 
-  try {
-    const response = await axios.get(url, {
-      timeout: 5000,
-      headers: {
-        "User-Agent": "FlyRankIntern-AI/1.0 (polite-scrapper)"
-      }
-    });
-
-    if (response.status !== 200) {
-      throw new Error(`Unexpected status: ${response.status}`);
-    }
-
-    fs.mkdirSync(cacheDir, { recursive: true });
-
-    fs.writeFileSync(cacheFile, response.data);
-
-    console.log(`FETCH: Catalogue Page ${pageNumber}`);
-
-    return response.data;
-
-  } catch (error) {
-    console.error(
-      `FAILED: Catalogue Page ${pageNumber} - ${error.message}`
+  const html =
+    await fetchPage(
+      url,
+      `Catalogue Page ${pageNumber}`
     );
 
+  if (!html) {
     return null;
   }
+
+  fs.mkdirSync(
+    cacheDir,
+    { recursive: true }
+  );
+
+  fs.writeFileSync(
+    cacheFile,
+    html
+  );
+
+  return html;
 }
 
 
 // ================================
 // FETCH BOOK DETAIL PAGE
 // ================================
-async function getBookPage(url, bookNumber) {
+async function getBookPage(
+  url,
+  bookNumber
+) {
+
   const cacheFile = path.join(
     cacheDir,
     `book-${bookNumber}.html`
   );
 
   if (fs.existsSync(cacheFile)) {
-    console.log(`CACHE HIT: Book ${bookNumber}`);
 
-    return fs.readFileSync(cacheFile, "utf8");
+    console.log(
+      `CACHE HIT: Book ${bookNumber}`
+    );
+
+    stats.cache_hits++;
+
+    return fs.readFileSync(
+      cacheFile,
+      "utf8"
+    );
   }
 
+  // Polite delay before real request
   await sleep(500);
 
-  try {
-    const response = await axios.get(url, {
-      timeout: 5000,
-      headers: {
-        "User-Agent": "FlyRankIntern-AI/1.0 (polite-scrapper)"
-      }
-    });
-
-    if (response.status !== 200) {
-      throw new Error(
-        `Unexpected status: ${response.status}`
-      );
-    }
-
-    fs.mkdirSync(cacheDir, {
-      recursive: true
-    });
-
-    fs.writeFileSync(
-      cacheFile,
-      response.data
+  const html =
+    await fetchPage(
+      url,
+      `Book ${bookNumber}`
     );
 
-    console.log(`FETCH: Book ${bookNumber}`);
-
-    return response.data;
-
-  } catch (error) {
-    console.error(
-      `FAILED: Book ${bookNumber} - ${error.message}`
-    );
-
+  if (!html) {
     return null;
   }
+
+  fs.mkdirSync(
+    cacheDir,
+    { recursive: true }
+  );
+
+  fs.writeFileSync(
+    cacheFile,
+    html
+  );
+
+  return html;
 }
 
 
@@ -136,8 +235,11 @@ async function getBookPage(url, bookNumber) {
 // DISCOVER FIRST 3 CATALOGUE PAGES
 // ================================
 async function discoverBooks() {
+
   let currentUrl = START_URL;
+
   let pageNumber = 1;
+
   let cataloguePages = 0;
 
   const bookUrls = new Set();
@@ -146,20 +248,26 @@ async function discoverBooks() {
     currentUrl &&
     cataloguePages < 3
   ) {
+
     const html =
       await getCataloguePage(
         currentUrl,
         pageNumber
       );
 
-    if (!html) break;
+    if (!html) {
+      break;
+    }
 
     cataloguePages++;
 
     const $ = cheerio.load(html);
 
+
+    // Collect book links
     $("article.product_pod h3 a").each(
       (_, element) => {
+
         const relativeUrl =
           $(element).attr("href");
 
@@ -173,10 +281,13 @@ async function discoverBooks() {
       }
     );
 
+
+    // Find next catalogue page
     const nextHref =
       $("li.next a").attr("href");
 
     if (nextHref) {
+
       currentUrl =
         new URL(
           nextHref,
@@ -184,10 +295,13 @@ async function discoverBooks() {
         ).href;
 
       pageNumber++;
+
     } else {
+
       currentUrl = null;
     }
   }
+
 
   return {
     cataloguePages,
@@ -204,6 +318,7 @@ function extractBookRecord(
   productUrl,
   sourcePage
 ) {
+
   const $ = cheerio.load(html);
 
   const title =
@@ -231,6 +346,7 @@ function extractBookRecord(
           value !== "star-rating"
       ) || null;
 
+
   const descriptionElement =
     $("#product_description")
       .next("p");
@@ -242,6 +358,7 @@ function extractBookRecord(
           .trim()
       : null;
 
+
   return {
     title,
     product_url: productUrl,
@@ -250,7 +367,8 @@ function extractBookRecord(
     rating_text: ratingText,
     description,
     source_page: sourcePage,
-    fetched_at: new Date().toISOString()
+    fetched_at:
+      new Date().toISOString()
   };
 }
 
@@ -259,9 +377,14 @@ function extractBookRecord(
 // STAGE 4: NORMALIZE RECORD
 // ================================
 function normalizeRecord(rawRecord) {
-  const priceNumber = parseFloat(
-    rawRecord.price_text.replace("£", "")
-  );
+
+  const priceNumber =
+    parseFloat(
+      rawRecord.price_text.replace(
+        "£",
+        ""
+      )
+    );
 
   return {
     ...rawRecord,
@@ -275,17 +398,46 @@ function normalizeRecord(rawRecord) {
 // ================================
 async function main() {
 
-  console.log("\nSTAGE 2: DISCOVERING BOOKS\n");
+  const startTime = new Date();
+
+  console.log(
+    "\nSTAGE 2: DISCOVERING BOOKS\n"
+  );
+
 
   const {
     cataloguePages,
     bookUrls
   } = await discoverBooks();
 
-  console.log("\nDISCOVERY CHECKPOINT");
-  console.log(`catalogue_pages=${cataloguePages}`);
-  console.log(`discovered=${bookUrls.length}`);
-  console.log(`unique_urls=${bookUrls.length}`);
+
+  console.log(
+    "\nDISCOVERY CHECKPOINT"
+  );
+
+  console.log(
+    `catalogue_pages=${cataloguePages}`
+  );
+
+  console.log(
+    `discovered=${bookUrls.length}`
+  );
+
+  console.log(
+    `unique_urls=${bookUrls.length}`
+  );
+
+
+  // =================================
+  // STAGE 5 TEST:
+  // Add one intentionally broken URL
+  // =================================
+
+  const testUrls = [
+    ...bookUrls,
+
+    "https://books.toscrape.com/catalogue/this-book-does-not-exist/index.html"
+  ];
 
 
   console.log(
@@ -294,9 +446,15 @@ async function main() {
 
   const rawRecords = [];
 
-  for (let i = 0; i < bookUrls.length; i++) {
 
-    const bookUrl = bookUrls[i];
+  for (
+    let i = 0;
+    i < testUrls.length;
+    i++
+  ) {
+
+    const bookUrl =
+      testUrls[i];
 
     const html =
       await getBookPage(
@@ -304,10 +462,21 @@ async function main() {
         i + 1
       );
 
-    if (!html) continue;
+
+    // One failed page does not stop the run
+    if (!html) {
+
+      console.log(
+        `SKIPPED: Book ${i + 1}`
+      );
+
+      continue;
+    }
+
 
     const sourcePage =
       Math.floor(i / 20) + 1;
+
 
     const record =
       extractBookRecord(
@@ -316,63 +485,90 @@ async function main() {
         `https://books.toscrape.com/catalogue/page-${sourcePage}.html`
       );
 
+
     rawRecords.push(record);
   }
 
 
   // ================================
-  // STAGE 4: VALIDATE AND STORE
+  // STAGE 4: VALIDATE RECORDS
   // ================================
   console.log(
     "\nSTAGE 4: CLEANING AND VALIDATING RECORDS\n"
   );
 
+
   const validRecords = [];
+
   const errors = [];
 
-  for (const rawRecord of rawRecords) {
+
+  for (
+    const rawRecord of rawRecords
+  ) {
 
     const normalizedRecord =
       normalizeRecord(rawRecord);
+
 
     const result =
       BookSchema.safeParse(
         normalizedRecord
       );
 
+
     if (result.success) {
-      validRecords.push(result.data);
+
+      validRecords.push(
+        result.data
+      );
+
     } else {
+
       errors.push({
-        record: normalizedRecord,
-        reason: result.error.issues
+        record:
+          normalizedRecord,
+
+        reason:
+          result.error.issues
       });
     }
   }
 
 
-  // Create output directory
-  fs.mkdirSync(outputDir, {
-    recursive: true
-  });
-
-
-  // Remove duplicate URLs
-  const uniqueRecords = Array.from(
-    new Map(
-      validRecords.map(
-        (record) => [
-          record.product_url,
-          record
-        ]
-      )
-    ).values()
+  fs.mkdirSync(
+    outputDir,
+    { recursive: true }
   );
 
 
-  // Write valid records
+  // Remove duplicate URLs
+  const uniqueRecords =
+    Array.from(
+
+      new Map(
+
+        validRecords.map(
+          (record) => [
+
+            record.product_url,
+
+            record
+          ]
+        )
+
+      ).values()
+
+    );
+
+
+  // Write books.json
   fs.writeFileSync(
-    path.join(outputDir, "books.json"),
+    path.join(
+      outputDir,
+      "books.json"
+    ),
+
     JSON.stringify(
       uniqueRecords,
       null,
@@ -381,9 +577,13 @@ async function main() {
   );
 
 
-  // Write invalid records
+  // Write errors.json
   fs.writeFileSync(
-    path.join(outputDir, "errors.json"),
+    path.join(
+      outputDir,
+      "errors.json"
+    ),
+
     JSON.stringify(
       errors,
       null,
@@ -393,36 +593,102 @@ async function main() {
 
 
   // ================================
-  // CHECKPOINT
+  // STAGE 5: RUN REPORT
   // ================================
-  console.log("\nSTAGE 4 CHECKPOINT");
+
+  const endTime =
+    new Date();
+
+  const durationMs =
+    endTime - startTime;
+
+
+  stats.valid_records =
+    uniqueRecords.length;
+
+  stats.invalid_records =
+    errors.length;
+
+
+  const runReport = {
+
+    start_time:
+      startTime.toISOString(),
+
+    end_time:
+      endTime.toISOString(),
+
+    duration_ms:
+      durationMs,
+
+    catalogue_pages:
+      cataloguePages,
+
+    pages_fetched:
+      stats.pages_fetched,
+
+    cache_hits:
+      stats.cache_hits,
+
+    valid_records:
+      stats.valid_records,
+
+    invalid_records:
+      stats.invalid_records,
+
+    failed_pages:
+      stats.failed_pages
+  };
+
+
+  fs.writeFileSync(
+    path.join(
+      outputDir,
+      "run-report.json"
+    ),
+
+    JSON.stringify(
+      runReport,
+      null,
+      2
+    )
+  );
+
+
+  // ================================
+  // FINAL CHECKPOINT
+  // ================================
+
+  console.log(
+    "\nSTAGE 5 CHECKPOINT"
+  );
 
   console.log(
     `books.json records=${uniqueRecords.length}`
   );
 
   console.log(
-    `errors=${errors.length}`
-  );
-
-  const allPricesAreNumbers =
-    uniqueRecords.every(
-      (record) =>
-        typeof record.price_gbp === "number"
-    );
-
-  const allUrlsAreHttps =
-    uniqueRecords.every(
-      (record) =>
-        record.product_url.startsWith("https://")
-    );
-
-  console.log(
-    `all_price_gbp_numbers=${allPricesAreNumbers}`
+    `failed_pages=${stats.failed_pages}`
   );
 
   console.log(
-    `all_urls_https=${allUrlsAreHttps}`
+    `cache_hits=${stats.cache_hits}`
+  );
+
+  console.log(
+    `valid_records=${stats.valid_records}`
+  );
+
+  console.log(
+    `invalid_records=${stats.invalid_records}`
+  );
+
+  console.log(
+    `duration_ms=${durationMs}`
+  );
+
+  console.log(
+    "\nRUN COMPLETED SUCCESSFULLY\n"
   );
 }
 
