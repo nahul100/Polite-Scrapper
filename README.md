@@ -565,3 +565,5 @@ This project demonstrates a complete small-scale scraping pipeline rather than s
 The final system checks the target before collection, makes polite HTTP requests, caches responses, discovers pages dynamically, extracts structured data, validates records, handles failures without terminating the run, and reports the outcome of each execution.
 
 The main objective was to build a scraper that is not only functional, but also reproducible, cautious, and able to continue working when individual pages fail.
+
+//coding untill solved
