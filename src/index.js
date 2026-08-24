@@ -2,14 +2,32 @@ const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
 const cheerio = require("cheerio");
+const { z } = require("zod");
 
 const START_URL =
   "https://books.toscrape.com/catalogue/page-1.html";
 
 const cacheDir = path.join(__dirname, "..", "cache");
+const outputDir = path.join(__dirname, "..", "output");
 
 const sleep = (ms) =>
   new Promise((resolve) => setTimeout(resolve, ms));
+
+
+// ================================
+// STAGE 4: BOOK SCHEMA
+// ================================
+const BookSchema = z.object({
+  title: z.string().min(1),
+  product_url: z.string().url(),
+  price_text: z.string().min(1),
+  price_gbp: z.number().nonnegative(),
+  availability_text: z.string().min(1),
+  rating_text: z.string().nullable(),
+  description: z.string().nullable(),
+  source_page: z.string().url(),
+  fetched_at: z.string()
+});
 
 
 // ================================
@@ -44,10 +62,7 @@ async function getCataloguePage(url, pageNumber) {
 
     fs.mkdirSync(cacheDir, { recursive: true });
 
-    fs.writeFileSync(
-      cacheFile,
-      response.data
-    );
+    fs.writeFileSync(cacheFile, response.data);
 
     console.log(`FETCH: Catalogue Page ${pageNumber}`);
 
@@ -75,13 +90,9 @@ async function getBookPage(url, bookNumber) {
   if (fs.existsSync(cacheFile)) {
     console.log(`CACHE HIT: Book ${bookNumber}`);
 
-    return fs.readFileSync(
-      cacheFile,
-      "utf8"
-    );
+    return fs.readFileSync(cacheFile, "utf8");
   }
 
-  // Polite delay before real request
   await sleep(500);
 
   try {
@@ -147,7 +158,6 @@ async function discoverBooks() {
 
     const $ = cheerio.load(html);
 
-    // Collect book links
     $("article.product_pod h3 a").each(
       (_, element) => {
         const relativeUrl =
@@ -163,7 +173,6 @@ async function discoverBooks() {
       }
     );
 
-    // Find next catalogue page
     const nextHref =
       $("li.next a").attr("href");
 
@@ -247,6 +256,21 @@ function extractBookRecord(
 
 
 // ================================
+// STAGE 4: NORMALIZE RECORD
+// ================================
+function normalizeRecord(rawRecord) {
+  const priceNumber = parseFloat(
+    rawRecord.price_text.replace("£", "")
+  );
+
+  return {
+    ...rawRecord,
+    price_gbp: priceNumber
+  };
+}
+
+
+// ================================
 // MAIN PROGRAM
 // ================================
 async function main() {
@@ -259,28 +283,19 @@ async function main() {
   } = await discoverBooks();
 
   console.log("\nDISCOVERY CHECKPOINT");
-  console.log(
-    `catalogue_pages=${cataloguePages}`
-  );
-  console.log(
-    `discovered=${bookUrls.length}`
-  );
-  console.log(
-    `unique_urls=${bookUrls.length}`
-  );
+  console.log(`catalogue_pages=${cataloguePages}`);
+  console.log(`discovered=${bookUrls.length}`);
+  console.log(`unique_urls=${bookUrls.length}`);
 
 
   console.log(
     "\nSTAGE 3: EXTRACTING BOOK DETAILS\n"
   );
 
-  const records = [];
+  const rawRecords = [];
 
-  for (
-    let i = 0;
-    i < bookUrls.length;
-    i++
-  ) {
+  for (let i = 0; i < bookUrls.length; i++) {
+
     const bookUrl = bookUrls[i];
 
     const html =
@@ -291,7 +306,6 @@ async function main() {
 
     if (!html) continue;
 
-    // Determine which catalogue page
     const sourcePage =
       Math.floor(i / 20) + 1;
 
@@ -302,24 +316,113 @@ async function main() {
         `https://books.toscrape.com/catalogue/page-${sourcePage}.html`
       );
 
-    records.push(record);
+    rawRecords.push(record);
   }
 
 
-  console.log("\nSTAGE 3 CHECKPOINT");
-
+  // ================================
+  // STAGE 4: VALIDATE AND STORE
+  // ================================
   console.log(
-    `detail_pages=${records.length}`
+    "\nSTAGE 4: CLEANING AND VALIDATING RECORDS\n"
   );
 
-  console.log("\nONE RAW RECORD:");
+  const validRecords = [];
+  const errors = [];
 
-  console.log(
+  for (const rawRecord of rawRecords) {
+
+    const normalizedRecord =
+      normalizeRecord(rawRecord);
+
+    const result =
+      BookSchema.safeParse(
+        normalizedRecord
+      );
+
+    if (result.success) {
+      validRecords.push(result.data);
+    } else {
+      errors.push({
+        record: normalizedRecord,
+        reason: result.error.issues
+      });
+    }
+  }
+
+
+  // Create output directory
+  fs.mkdirSync(outputDir, {
+    recursive: true
+  });
+
+
+  // Remove duplicate URLs
+  const uniqueRecords = Array.from(
+    new Map(
+      validRecords.map(
+        (record) => [
+          record.product_url,
+          record
+        ]
+      )
+    ).values()
+  );
+
+
+  // Write valid records
+  fs.writeFileSync(
+    path.join(outputDir, "books.json"),
     JSON.stringify(
-      records[0],
+      uniqueRecords,
       null,
       2
     )
+  );
+
+
+  // Write invalid records
+  fs.writeFileSync(
+    path.join(outputDir, "errors.json"),
+    JSON.stringify(
+      errors,
+      null,
+      2
+    )
+  );
+
+
+  // ================================
+  // CHECKPOINT
+  // ================================
+  console.log("\nSTAGE 4 CHECKPOINT");
+
+  console.log(
+    `books.json records=${uniqueRecords.length}`
+  );
+
+  console.log(
+    `errors=${errors.length}`
+  );
+
+  const allPricesAreNumbers =
+    uniqueRecords.every(
+      (record) =>
+        typeof record.price_gbp === "number"
+    );
+
+  const allUrlsAreHttps =
+    uniqueRecords.every(
+      (record) =>
+        record.product_url.startsWith("https://")
+    );
+
+  console.log(
+    `all_price_gbp_numbers=${allPricesAreNumbers}`
+  );
+
+  console.log(
+    `all_urls_https=${allUrlsAreHttps}`
   );
 }
 
